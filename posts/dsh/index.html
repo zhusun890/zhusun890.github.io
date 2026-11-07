@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN" data-base=""><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>观后感: DeepSeek Harness - Super agent · zhusun</title><meta name="description" content="年轻人的第 $maxWorkers 台深度求索智能体框架"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="alternate" type="application/rss+xml" title="zhusun" href="/feed.xml"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin=""><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500&amp;family=Noto+Serif+SC:wght@400;500&amp;family=JetBrains+Mono&amp;display=swap"><link rel="stylesheet" href="/style.css"><script src="/search.js" defer></script><script src="/toc.js" defer></script><script src="/comments.js" defer></script></head><body><header class="site-header"><a class="site-title" href="/">zhusun</a><nav class="site-nav" aria-label="主导航"><a href="/" aria-current="page">文章</a><a href="/archive/">归档</a><a href="/tags/">标签</a><button class="icon-button" type="button" data-search-open aria-label="搜索（⌘K）"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg></button></nav></header><main><div class="post-layout"><article class="enter" data-pagefind-body><p class="post-meta" data-pagefind-ignore><time datetime="2026-11-05">2026 年 11 月 5 日</time> · 编辑于 <time datetime="2026-11-07">2026 年 11 月 7 日</time> · <a href="/tags/LLM/">LLM</a> · <a href="/tags/Agent/">Agent</a></p><h1 class="post-title" data-pagefind-meta="title">观后感: DeepSeek Harness - Super agent</h1><p class="post-description">年轻人的第 $maxWorkers 台深度求索智能体框架</p><details class="toc-mobile" data-pagefind-ignore><summary>目录</summary><ol><li class="level-2"><a href="#super-agent">Super-agent</a></li><li class="level-2"><a href="#pros">Pros</a></li><li class="level-2"><a href="#cons">Cons</a></li><li class="level-2"><a href="#then">Then</a></li></ol></details><div class="prose"><p>近期，DeepSeek Harness 团队发布了<a href="https://www.bilibili.com/opus/1265361021143351318">《Super-agent 设计探索：迈向更自主的 Agent 系统》</a>，并同步开源了原型仓库 <a href="https://github.com/deepseek-ai/dsh-superagent-prototype">dsh-superagent-prototype</a>。本文将阐述笔者在读完文章和源码后的想法。</p>
+<hr>
+<h2 id="super-agent">Super-agent</h2>
+<p>Super-agent 的核心是一个“Router + Worker”双层结构（代码里分别对应 <code>orchestrator</code> 和 <code>worker</code>，文档中也称作 main session 和 executor session）。</p>
+<p>每个 Super-agent 部署都绑定单个 repository，维护一个 Router session 和多个 Worker session。系统会从多个渠道，例如 GitHub (PRs, issues, etc.)、飞书接收信息，并通知 Router 和 Worker。Router 在接收到来自 &quot;threads&quot; 的消息后 (例如 GitHub 上一个 issue 或一个 pr 就算一个 thread)，可以执行以下操作:</p>
+<ul>
+<li><p><strong>接收任务。</strong> Router 创建一个新的 “Ticket” 并自动为这个 Ticket 分配一个 Agent (worker session)。Ticket 会记录该任务的各种信息，例如标题、代号、以及不超过 30 词的备注消息，这些信息也会被发送给 worker，worker 也可以在工作过程中更新 ticket 状态。Ticket 创建完成后，为用户回复一句确认消息; 对于后续发生在这个 thread 上的新消息将直接被转发给 worker。<br><small style="color: var(--accent)">(例如: 你开了一个 issue (并 @ 了 dsh)，这个 issue 最开始会被发给 router，然后如果 router选择接收任务，创建 ticket，接下来在这个 issue 里发的 comment 会被直接发给对应ticket 绑定的 worker session)</small></p>
+</li>
+<li><p><strong>分配任务到现有的 Ticket。</strong> Router 可以将新的 thread 绑定给已有的 ticket, 并让 ticket 绑定的 worker session 工作</p>
+</li>
+<li><p><strong>停止任务。</strong> 被明确要求停下某个 ticket 时，Router 可以终止该 ticket。</p>
+</li>
+<li><p><strong>忽略。</strong> 什么都不做。</p>
+</li>
+</ul>
+<p>很明显这里 Router 完全不拆解任务，他们不理解任务，他们只是任务的搬运工。每个 worker 都会在自己的 git worktree 里工作，所以它们彼此看不到其他人 (或者 agent) 改了什么，在他们改的过程中其他 agent 的改动也不会影响他们，但合并的时候就难说了。</p>
+<hr>
+<h2 id="pros">Pros</h2>
+<p><em>想象你写了一个小脚本，自动检测 GitHub 上特定仓库有没有新的 (符合条件的) PR 和 issues，为这些 PR 和 issue 启动独立的 Claude Code + worktree，并将对应 PR 和 issue 下方的新评论再直接转发给各自的 Claude Code 完成工作</em></p>
+<p>这几乎就是 Super-agent 的最简工作方式，而它额外引入一个 Router 来在更复杂的信息环境下 (例如飞书群聊) 中提取消息，判断内容，并根据上下文选择 attach 到现有 ticket 还是创建新的 ticket。</p>
+<p>那么它在理想情况下的好处也许就是并发较高且<em>省心智</em>，你以及其他的维护者，可以在多个地方随时随地要求你的 Agent 干活，可以想到什么说什么 <small style="color: var(--accent)">(然而实际上并不太行, 见后文)</small>，以往要这么做通常还需要手动维护多个 agent 窗口，针对每个窗口描述需求，并审查每个窗口的产出，通常是一大坨 diff 和一篇车轱辘话来回说的 Markdown 总结。</p>
+<p>同时对于通过多条请求来下达的、完全可以并发的任务，它也会分成多个任务来并行执行，这样就更省时间 (也会更快地燃烧你的额度) 了。</p>
+<hr>
+<h2 id="cons">Cons</h2>
+<p>然而笔者发现在 <code>dsh-superagent-prototype</code> 中默认要求 Router 只在请求明确指向已有 ticket 时才 attach，否则默认创建。</p>
+<blockquote>
+<p><a href="https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/prompts/dispatch.md"><small>dispatch.md</small></a></p>
+<pre><code class="hljs">Attach only when the message points at that ticket explicitly: it quotes or links the ticket&#x27;s PR or Issue, its source message or its acknowledgement, or it refers to the change just made and exactly one ticket fits.
+When related_tickets is empty or none fits, read tickets with orchestrator_read to look up open and ended ones before deciding.
+A message on a similar subject is a new request: accept or ignore it, never attach it.
+A duplicate ticket can be closed; a wrong attachment subscribes the ticket to the whole thread and stays.
+</code></pre></blockquote>
+<p>笔者认为 Super-agent 在产出效果上的边际效应有限，更多像一个 scaffold 来让用户方便高效管理一个大项目中多个能够并行 build 的功能，当然 router 并不会为你判断任务是否可并行。</p>
+<p>由于 workers 间 context 不共享，信息瓶颈还可能会让产出质量更糟: 比如说如果两个模型的任务实际上有某种 implicit dependency 关系，他们很可能只能在自己的 worktree 里改自己的东西，而完全不知道其他 agent 改了什么，并且这种 dependency 关系往往不仅限于代码任务里。</p>
+<p>Router 可能面临一个先有鸡还是先有蛋的问题，如果你不去完成任务，你就很难穷尽两个任务之间的依赖关系。</p>
+<p>笔者在<a href="https://github.com/zhusun890/dsh-superagent-router-mock">这里</a>构造了 4 个例子，它们分别包含 2 条消息来描述两个有依赖关系的任务，来测试 Router 在这类场景下的行为。测试模型 <code>deepseek-flash</code>。</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>消息</th>
+<th>设定的依赖</th>
+<th>次数</th>
+<th>Router 的处理</th>
+<th>查过已有 ticket</th>
+<th>关联提醒</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>补充需求没点回复</td>
+<td>Alice：<code>给设置页添加一个亮色暗色开关</code><br>10 秒后<br>Alice：<code>另外记得加跟随系统模式……选项用卡片而非 dropdown</code></td>
+<td>第二条是第一条的补充</td>
+<td>1</td>
+<td>第二条挂到第一个 ticket</td>
+<td>1/1</td>
+<td>1 条 routing note</td>
+</tr>
+<tr>
+<td>偏好存储迁移</td>
+<td>Alice：<code>给设置页添加一个亮色暗色开关</code><br>6 分钟后<br>Bob：<code>把用户偏好（语言、通知开关）从 localStorage 改成存到后端</code></td>
+<td>主题偏好也存在 localStorage</td>
+<td>3</td>
+<td>3/3 两条各开一个 ticket</td>
+<td>0/3</td>
+<td>无</td>
+</tr>
+<tr>
+<td>多个 ticket 都像</td>
+<td>已有 3 个进行中的 ticket：<code>主题色抽成 CSS 变量</code>、<code>首页图表换新库</code>、<code>设置页亮色暗色开关</code><br>Alice：<code>暗色模式下首页图表的坐标轴文字看不清，改成浅色</code></td>
+<td>修复要用到暗色变量和新图表库</td>
+<td>3</td>
+<td>3/3 新开一个 ticket</td>
+<td>0/3</td>
+<td>无</td>
+</tr>
+<tr>
+<td>Subagent 超时</td>
+<td>Alice：<code>给 research subagent 加 60 秒超时，超时先返回已搜到的结果</code><br>8 分钟后<br>Bob：<code>主 agent 汇总时，某个 subagent 结果不完整要提醒用户</code></td>
+<td>“结果不完整”的信号由第一条的改动产生</td>
+<td>3</td>
+<td>3/3 两条各开一个 ticket</td>
+<td>0/3</td>
+<td>无</td>
+</tr>
+</tbody></table>
+<p>令人忍俊不禁，除了第一个简单场景，在剩余 3 个场景中 Router 没有处理任何任务和 ticket 之间的依赖关系。这样的话我们大概率会收获一大堆存在冲突的 worktree，同时消耗了更多的 token，并且最后我们还是要解决冲突。</p>
+<p>原文也基本没有就这类情况进行讨论，Section 7.1 (消融实验) 只测量了任务完成所消耗的时间 <small>(以及 token usage)</small>，实际任务则使用了耗时长的 mock tool 代替:</p>
+<blockquote>
+<p><a href="https://www.bilibili.com/opus/1265361021143351318">《Super-agent 设计探索：迈向更自主的 Agent 系统》7.1 章</a></p>
+<p>7.1 消融实验</p>
+<p>我们用群聊和 GitHub CI 消息流同时驱动四种端到端方案：单次实验包含约 300 条消息，其中约 20 条是工作请求，其余是闲聊、跟进、叫停和 CI 消息。<b style="color: var(--accent)">编码工作用一个只消耗时间的工具代替</b>，因此实验衡量的是系统的调度与协作能力，而非对单个任务的执行能力。每种方案重复运行 5 次。</p>
+</blockquote>
+<p>笔者曾以为大伙 vibe coding 是为了产出，看来笔者过时了，大伙已经富裕到开 ultracode 类似物烧 token 玩而不在意产出质量的地步了。</p>
+<img src="/images/dsh-1.png" alt="Deobf?" width="10%" style="border-radius: 0"><p>哪怕我们不考虑简单的、只耗时的 mock tool 是否真的能够代表真实 coding task 中的 load 和耗时，笔者也认为这就像是在多线程环境里把 <a href="https://docs.oracle.com/en/java/javase/27/docs/api/java.base/java/util/concurrent/ConcurrentHashMap.html"><span style="color: var(--accent)">ConcurrentHashMap</span></a> 换成不加锁的 <a href="https://docs.oracle.com/en/java/javase/27/docs/api/java.base/java/util/HashMap.html"><span style="color: var(--accent)">HashMap</span></a> 并删除 <a href="https://docs.oracle.com/en/java/javase/27/docs/api/java.base/java/util/ConcurrentModificationException.html"><span style="color: var(--accent)">ConcurrentModificationException</span></a>，然后宣布吞吐量大幅提升。虽然我们没检查效果，我们只是“衡量了系统的调度能力”，但你就说 clock time 是不是降低了吧！</p>
+<hr>
+<h2 id="then">Then</h2>
+<p>笔者认为，质量的瓶颈在于并行的 workers 在任务过程中的通信手段。</p>
+<p>例如，Router 模型 <small>(orchestrator, coordinator, leader, whatever you call it)</small> 依然可以从 ReAct 中取得某种启发: 成为响应式的调度器，而不是 &quot;one time forward pass&quot; 的路由器</p>
+<p>但是这需要 router 是一个足够强的模型，能“隐式维护”某种 dependency hierarchy graph，至少理解每个模型在做什么，因为 worker 自己不知道其他 workers 在干什么，也不知道自己的改动会不会破坏其他 worker 的依赖，因此也不会报告这些给 router。</p>
+<p>最合适的协作方式可能会在 agentic RL 的 sandbox 中涌现，如果用类似设计的 harness 训练模型，模型确实就有可能（只是有可能）会学会预判依赖关系并报告。并且对于这样一个全新且 model 并不熟悉的架构，社区的 harness 设计需要和训练联动，否则只靠 zero shot 或 system 里的几个例子，模型可能根本就不理解怎么在这个庞大的 agent network 里行动和协作，指望模型在数百 K 上下文中对那几个可怜的例子保持强大的 ICL 能力，笔者觉得非常困难</p>
+<p>(当然这属于另一个问题，也就是为 subagents (或者没有 leader agent 的 agent network) 寻找一个有效的通信协作机制并推广，目前仍然在探索当中)</p>
+</div><section class="comments" aria-labelledby="comments-title" data-pagefind-ignore><div class="comments-header"><h2 id="comments-title">评论<span data-comments-count></span></h2><a data-comments-link hidden>在 GitHub 上查看</a></div><script src="https://giscus.app/client.js" data-repo="zhusun890/zhusun890.github.io" data-repo-id="R_kgDOVihbcw" data-category="Announcements" data-category-id="DIC_kwDOVihbc84DKXSD" data-mapping="pathname" data-strict="1" data-reactions-enabled="0" data-emit-metadata="1" data-input-position="bottom" data-theme="https://zhusun890.github.io/giscus.css" data-lang="zh-CN" data-loading="lazy" crossorigin="anonymous" async></script></section></article><aside class="toc" aria-label="文章目录"><div class="toc-inner"><p class="toc-title">目录</p><ol><li class="level-2"><a href="#super-agent">Super-agent</a></li><li class="level-2"><a href="#pros">Pros</a></li><li class="level-2"><a href="#cons">Cons</a></li><li class="level-2"><a href="#then">Then</a></li></ol></div></aside></div></main><footer class="site-footer"><span>© 2026 zhusun</span><nav aria-label="订阅和链接"><a href="/feed.xml">RSS</a></nav></footer><dialog class="search-dialog" id="search-dialog" aria-label="搜索文章"><div class="search-bar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg><label for="search-input" class="visually-hidden">搜索关键词</label><input id="search-input" type="search" placeholder="搜索文章" autocomplete="off" spellcheck="false"><button class="icon-button search-close" type="button" data-search-close aria-label="关闭搜索">esc</button></div><ul class="search-results" role="listbox" aria-label="搜索结果"></ul><p class="search-status" role="status"></p></dialog></body></html>

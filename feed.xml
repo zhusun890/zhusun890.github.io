@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>zhusun</title>
+    <link>https://zhusun890.github.io/</link>
+    <description></description>
+    <language>zh-CN</language>
+    <item>
+      <title>观后感: DeepSeek Harness - Super agent</title>
+      <link>https://zhusun890.github.io/posts/dsh/</link>
+      <guid>https://zhusun890.github.io/posts/dsh/</guid>
+      <pubDate>Thu, 05 Nov 2026 00:00:00 GMT</pubDate>
+      <description>&lt;p&gt;近期，DeepSeek Harness 团队发布了&lt;a href=&quot;https://www.bilibili.com/opus/1265361021143351318&quot;&gt;《Super-agent 设计探索：迈向更自主的 Agent 系统》&lt;/a&gt;，并同步开源了原型仓库 &lt;a href=&quot;https://github.com/deepseek-ai/dsh-superagent-prototype&quot;&gt;dsh-superagent-prototype&lt;/a&gt;。本文将阐述笔者在读完文章和源码后的想法。&lt;/p&gt;
+&lt;hr&gt;
+&lt;h2 id=&quot;super-agent&quot;&gt;Super-agent&lt;/h2&gt;
+&lt;p&gt;Super-agent 的核心是一个“Router + Worker”双层结构（代码里分别对应 &lt;code&gt;orchestrator&lt;/code&gt; 和 &lt;code&gt;worker&lt;/code&gt;，文档中也称作 main session 和 executor session）。&lt;/p&gt;
+&lt;p&gt;每个 Super-agent 部署都绑定单个 repository，维护一个 Router session 和多个 Worker session。系统会从多个渠道，例如 GitHub (PRs, issues, etc.)、飞书接收信息，并通知 Router 和 Worker。Router 在接收到来自 &amp;quot;threads&amp;quot; 的消息后 (例如 GitHub 上一个 issue 或一个 pr 就算一个 thread)，可以执行以下操作:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;&lt;strong&gt;接收任务。&lt;/strong&gt; Router 创建一个新的 “Ticket” 并自动为这个 Ticket 分配一个 Agent (worker session)。Ticket 会记录该任务的各种信息，例如标题、代号、以及不超过 30 词的备注消息，这些信息也会被发送给 worker，worker 也可以在工作过程中更新 ticket 状态。Ticket 创建完成后，为用户回复一句确认消息; 对于后续发生在这个 thread 上的新消息将直接被转发给 worker。&lt;br&gt;&lt;small style=&quot;color: var(--accent)&quot;&gt;(例如: 你开了一个 issue (并 @ 了 dsh)，这个 issue 最开始会被发给 router，然后如果 router选择接收任务，创建 ticket，接下来在这个 issue 里发的 comment 会被直接发给对应ticket 绑定的 worker session)&lt;/small&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;strong&gt;分配任务到现有的 Ticket。&lt;/strong&gt; Router 可以将新的 thread 绑定给已有的 ticket, 并让 ticket 绑定的 worker session 工作&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;strong&gt;停止任务。&lt;/strong&gt; 被明确要求停下某个 ticket 时，Router 可以终止该 ticket。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;strong&gt;忽略。&lt;/strong&gt; 什么都不做。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;很明显这里 Router 完全不拆解任务，他们不理解任务，他们只是任务的搬运工。每个 worker 都会在自己的 git worktree 里工作，所以它们彼此看不到其他人 (或者 agent) 改了什么，在他们改的过程中其他 agent 的改动也不会影响他们，但合并的时候就难说了。&lt;/p&gt;
+&lt;hr&gt;
+&lt;h2 id=&quot;pros&quot;&gt;Pros&lt;/h2&gt;
+&lt;p&gt;&lt;em&gt;想象你写了一个小脚本，自动检测 GitHub 上特定仓库有没有新的 (符合条件的) PR 和 issues，为这些 PR 和 issue 启动独立的 Claude Code + worktree，并将对应 PR 和 issue 下方的新评论再直接转发给各自的 Claude Code 完成工作&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;这几乎就是 Super-agent 的最简工作方式，而它额外引入一个 Router 来在更复杂的信息环境下 (例如飞书群聊) 中提取消息，判断内容，并根据上下文选择 attach 到现有 ticket 还是创建新的 ticket。&lt;/p&gt;
+&lt;p&gt;那么它在理想情况下的好处也许就是并发较高且&lt;em&gt;省心智&lt;/em&gt;，你以及其他的维护者，可以在多个地方随时随地要求你的 Agent 干活，可以想到什么说什么 &lt;small style=&quot;color: var(--accent)&quot;&gt;(然而实际上并不太行, 见后文)&lt;/small&gt;，以往要这么做通常还需要手动维护多个 agent 窗口，针对每个窗口描述需求，并审查每个窗口的产出，通常是一大坨 diff 和一篇车轱辘话来回说的 Markdown 总结。&lt;/p&gt;
+&lt;p&gt;同时对于通过多条请求来下达的、完全可以并发的任务，它也会分成多个任务来并行执行，这样就更省时间 (也会更快地燃烧你的额度) 了。&lt;/p&gt;
+&lt;hr&gt;
+&lt;h2 id=&quot;cons&quot;&gt;Cons&lt;/h2&gt;
+&lt;p&gt;然而笔者发现在 &lt;code&gt;dsh-superagent-prototype&lt;/code&gt; 中默认要求 Router 只在请求明确指向已有 ticket 时才 attach，否则默认创建。&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/prompts/dispatch.md&quot;&gt;&lt;small&gt;dispatch.md&lt;/small&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;pre&gt;&lt;code class=&quot;hljs&quot;&gt;Attach only when the message points at that ticket explicitly: it quotes or links the ticket&amp;#x27;s PR or Issue, its source message or its acknowledgement, or it refers to the change just made and exactly one ticket fits.
+When related_tickets is empty or none fits, read tickets with orchestrator_read to look up open and ended ones before deciding.
+A message on a similar subject is a new request: accept or ignore it, never attach it.
+A duplicate ticket can be closed; a wrong attachment subscribes the ticket to the whole thread and stays.
+&lt;/code&gt;&lt;/pre&gt;&lt;/blockquote&gt;
+&lt;p&gt;笔者认为 Super-agent 在产出效果上的边际效应有限，更多像一个 scaffold 来让用户方便高效管理一个大项目中多个能够并行 build 的功能，当然 router 并不会为你判断任务是否可并行。&lt;/p&gt;
+&lt;p&gt;由于 workers 间 context 不共享，信息瓶颈还可能会让产出质量更糟: 比如说如果两个模型的任务实际上有某种 implicit dependency 关系，他们很可能只能在自己的 worktree 里改自己的东西，而完全不知道其他 agent 改了什么，并且这种 dependency 关系往往不仅限于代码任务里。&lt;/p&gt;
+&lt;p&gt;Router 可能面临一个先有鸡还是先有蛋的问题，如果你不去完成任务，你就很难穷尽两个任务之间的依赖关系。&lt;/p&gt;
+&lt;p&gt;笔者在&lt;a href=&quot;https://github.com/zhusun890/dsh-superagent-router-mock&quot;&gt;这里&lt;/a&gt;构造了 4 个例子，它们分别包含 2 条消息来描述两个有依赖关系的任务，来测试 Router 在这类场景下的行为。测试模型 &lt;code&gt;deepseek-flash&lt;/code&gt;。&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;场景&lt;/th&gt;
+&lt;th&gt;消息&lt;/th&gt;
+&lt;th&gt;设定的依赖&lt;/th&gt;
+&lt;th&gt;次数&lt;/th&gt;
+&lt;th&gt;Router 的处理&lt;/th&gt;
+&lt;th&gt;查过已有 ticket&lt;/th&gt;
+&lt;th&gt;关联提醒&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;&lt;tr&gt;
+&lt;td&gt;补充需求没点回复&lt;/td&gt;
+&lt;td&gt;Alice：&lt;code&gt;给设置页添加一个亮色暗色开关&lt;/code&gt;&lt;br&gt;10 秒后&lt;br&gt;Alice：&lt;code&gt;另外记得加跟随系统模式……选项用卡片而非 dropdown&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;第二条是第一条的补充&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;第二条挂到第一个 ticket&lt;/td&gt;
+&lt;td&gt;1/1&lt;/td&gt;
+&lt;td&gt;1 条 routing note&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;偏好存储迁移&lt;/td&gt;
+&lt;td&gt;Alice：&lt;code&gt;给设置页添加一个亮色暗色开关&lt;/code&gt;&lt;br&gt;6 分钟后&lt;br&gt;Bob：&lt;code&gt;把用户偏好（语言、通知开关）从 localStorage 改成存到后端&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;主题偏好也存在 localStorage&lt;/td&gt;
+&lt;td&gt;3&lt;/td&gt;
+&lt;td&gt;3/3 两条各开一个 ticket&lt;/td&gt;
+&lt;td&gt;0/3&lt;/td&gt;
+&lt;td&gt;无&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;多个 ticket 都像&lt;/td&gt;
+&lt;td&gt;已有 3 个进行中的 ticket：&lt;code&gt;主题色抽成 CSS 变量&lt;/code&gt;、&lt;code&gt;首页图表换新库&lt;/code&gt;、&lt;code&gt;设置页亮色暗色开关&lt;/code&gt;&lt;br&gt;Alice：&lt;code&gt;暗色模式下首页图表的坐标轴文字看不清，改成浅色&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;修复要用到暗色变量和新图表库&lt;/td&gt;
+&lt;td&gt;3&lt;/td&gt;
+&lt;td&gt;3/3 新开一个 ticket&lt;/td&gt;
+&lt;td&gt;0/3&lt;/td&gt;
+&lt;td&gt;无&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Subagent 超时&lt;/td&gt;
+&lt;td&gt;Alice：&lt;code&gt;给 research subagent 加 60 秒超时，超时先返回已搜到的结果&lt;/code&gt;&lt;br&gt;8 分钟后&lt;br&gt;Bob：&lt;code&gt;主 agent 汇总时，某个 subagent 结果不完整要提醒用户&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;“结果不完整”的信号由第一条的改动产生&lt;/td&gt;
+&lt;td&gt;3&lt;/td&gt;
+&lt;td&gt;3/3 两条各开一个 ticket&lt;/td&gt;
+&lt;td&gt;0/3&lt;/td&gt;
+&lt;td&gt;无&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;&lt;/table&gt;
+&lt;p&gt;令人忍俊不禁，除了第一个简单场景，在剩余 3 个场景中 Router 没有处理任何任务和 ticket 之间的依赖关系。这样的话我们大概率会收获一大堆存在冲突的 worktree，同时消耗了更多的 token，并且最后我们还是要解决冲突。&lt;/p&gt;
+&lt;p&gt;原文也基本没有就这类情况进行讨论，Section 7.1 (消融实验) 只测量了任务完成所消耗的时间 &lt;small&gt;(以及 token usage)&lt;/small&gt;，实际任务则使用了耗时长的 mock tool 代替:&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.bilibili.com/opus/1265361021143351318&quot;&gt;《Super-agent 设计探索：迈向更自主的 Agent 系统》7.1 章&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;7.1 消融实验&lt;/p&gt;
+&lt;p&gt;我们用群聊和 GitHub CI 消息流同时驱动四种端到端方案：单次实验包含约 300 条消息，其中约 20 条是工作请求，其余是闲聊、跟进、叫停和 CI 消息。&lt;b style=&quot;color: var(--accent)&quot;&gt;编码工作用一个只消耗时间的工具代替&lt;/b&gt;，因此实验衡量的是系统的调度与协作能力，而非对单个任务的执行能力。每种方案重复运行 5 次。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;笔者曾以为大伙 vibe coding 是为了产出，看来笔者过时了，大伙已经富裕到开 ultracode 类似物烧 token 玩而不在意产出质量的地步了。&lt;/p&gt;
+&lt;img src=&quot;https://zhusun890.github.io/images/dsh-1.png&quot; alt=&quot;Deobf?&quot; width=&quot;10%&quot; style=&quot;border-radius: 0&quot;&gt;&lt;p&gt;哪怕我们不考虑简单的、只耗时的 mock tool 是否真的能够代表真实 coding task 中的 load 和耗时，笔者也认为这就像是在多线程环境里把 &lt;a href=&quot;https://docs.oracle.com/en/java/javase/27/docs/api/java.base/java/util/concurrent/ConcurrentHashMap.html&quot;&gt;&lt;span style=&quot;color: var(--accent)&quot;&gt;ConcurrentHashMap&lt;/span&gt;&lt;/a&gt; 换成不加锁的 &lt;a href=&quot;https://docs.oracle.com/en/java/javase/27/docs/api/java.base/java/util/HashMap.html&quot;&gt;&lt;span style=&quot;color: var(--accent)&quot;&gt;HashMap&lt;/span&gt;&lt;/a&gt; 并删除 &lt;a href=&quot;https://docs.oracle.com/en/java/javase/27/docs/api/java.base/java/util/ConcurrentModificationException.html&quot;&gt;&lt;span style=&quot;color: var(--accent)&quot;&gt;ConcurrentModificationException&lt;/span&gt;&lt;/a&gt;，然后宣布吞吐量大幅提升。虽然我们没检查效果，我们只是“衡量了系统的调度能力”，但你就说 clock time 是不是降低了吧！&lt;/p&gt;
+&lt;hr&gt;
+&lt;h2 id=&quot;then&quot;&gt;Then&lt;/h2&gt;
+&lt;p&gt;笔者认为，质量的瓶颈在于并行的 workers 在任务过程中的通信手段。&lt;/p&gt;
+&lt;p&gt;例如，Router 模型 &lt;small&gt;(orchestrator, coordinator, leader, whatever you call it)&lt;/small&gt; 依然可以从 ReAct 中取得某种启发: 成为响应式的调度器，而不是 &amp;quot;one time forward pass&amp;quot; 的路由器&lt;/p&gt;
+&lt;p&gt;但是这需要 router 是一个足够强的模型，能“隐式维护”某种 dependency hierarchy graph，至少理解每个模型在做什么，因为 worker 自己不知道其他 workers 在干什么，也不知道自己的改动会不会破坏其他 worker 的依赖，因此也不会报告这些给 router。&lt;/p&gt;
+&lt;p&gt;最合适的协作方式可能会在 agentic RL 的 sandbox 中涌现，如果用类似设计的 harness 训练模型，模型确实就有可能（只是有可能）会学会预判依赖关系并报告。并且对于这样一个全新且 model 并不熟悉的架构，社区的 harness 设计需要和训练联动，否则只靠 zero shot 或 system 里的几个例子，模型可能根本就不理解怎么在这个庞大的 agent network 里行动和协作，指望模型在数百 K 上下文中对那几个可怜的例子保持强大的 ICL 能力，笔者觉得非常困难&lt;/p&gt;
+&lt;p&gt;(当然这属于另一个问题，也就是为 subagents (或者没有 leader agent 的 agent network) 寻找一个有效的通信协作机制并推广，目前仍然在探索当中)&lt;/p&gt;
+</description>
+    </item>
+  </channel>
+</rss>
